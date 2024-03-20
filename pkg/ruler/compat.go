@@ -16,19 +16,22 @@ import (
 	"github.com/grafana/dskit/user"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
+	"github.com/prometheus/prometheus/storage"
+
 	"github.com/prometheus/prometheus/notifier"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/rules"
-	"github.com/prometheus/prometheus/storage"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/querier"
 	querier_stats "github.com/grafana/mimir/pkg/querier/stats"
+	rulerstorage "github.com/grafana/mimir/pkg/ruler/storage"
 	util_log "github.com/grafana/mimir/pkg/util/log"
 )
 
@@ -150,6 +153,9 @@ type RulesLimits interface {
 	RulerRecordingRulesEvaluationEnabled(userID string) bool
 	RulerAlertingRulesEvaluationEnabled(userID string) bool
 	RulerSyncRulesOnChangesEnabled(userID string) bool
+
+	RulerRemoteWriteDisabled(userID string) bool
+	RulerRemoteWriteConfig(userID string, id string) *config.RemoteWriteConfig
 }
 
 func MetricsQueryFunc(qf rules.QueryFunc, queries, failedQueries prometheus.Counter, remoteQuerier bool) rules.QueryFunc {
@@ -269,6 +275,7 @@ func DefaultTenantManagerFactory(
 	queryable storage.Queryable,
 	queryFunc rules.QueryFunc,
 	overrides RulesLimits,
+	logger log.Logger,
 	reg prometheus.Registerer,
 ) ManagerFactory {
 	totalWrites := promauto.With(reg).NewCounter(prometheus.CounterOpts{
@@ -279,7 +286,6 @@ func DefaultTenantManagerFactory(
 		Name: "cortex_ruler_write_requests_failed_total",
 		Help: "Number of failed write requests to ingesters.",
 	})
-
 	totalQueries := promauto.With(reg).NewCounter(prometheus.CounterOpts{
 		Name: "cortex_ruler_queries_total",
 		Help: "Number of queries executed by ruler.",
@@ -300,9 +306,22 @@ func DefaultTenantManagerFactory(
 			Help: "Number of queries that did not fetch any series by ruler.",
 		}, []string{"user"})
 	}
-	return func(ctx context.Context, userID string, notifier *notifier.Manager, logger log.Logger, reg prometheus.Registerer) RulesManager {
+	var registry storageRegistry
+	if cfg.RemoteWrite.Enabled {
+		registry = newWALRegistry(log.With(logger, "storage", "registry"), reg, cfg, overrides)
+	} else {
+		registry = nullRegistry{}
+	}
+	return func(
+		ctx context.Context,
+		userID string,
+		notifier *notifier.Manager,
+		logger log.Logger,
+		reg prometheus.Registerer,
+	) RulesManager {
 		var queryTime prometheus.Counter
 		var zeroFetchedSeriesCount prometheus.Counter
+
 		if rulerQuerySeconds != nil {
 			queryTime = rulerQuerySeconds.WithLabelValues(userID)
 			zeroFetchedSeriesCount = zeroFetchedSeriesQueries.WithLabelValues(userID)
@@ -316,8 +335,14 @@ func DefaultTenantManagerFactory(
 		// Wrap the queryable with our custom logic.
 		wrappedQueryable := WrapQueryableWithReadConsistency(queryable, logger)
 
+		var appendable storage.Appendable = NewPusherAppendable(p, userID, totalWrites, failedWrites)
+		if cfg.RemoteWrite.Enabled {
+			registry.configureTenantStorage(userID)
+			appendables := []storage.Appendable{appendable, registry}
+			appendable = rulerstorage.NewFanout(appendables, reg)
+		}
 		return rules.NewManager(&rules.ManagerOptions{
-			Appendable:                 NewPusherAppendable(p, userID, totalWrites, failedWrites),
+			Appendable:                 appendable,
 			Queryable:                  wrappedQueryable,
 			QueryFunc:                  wrappedQueryFunc,
 			Context:                    user.InjectOrgID(ctx, userID),

@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/rulefmt"
@@ -509,7 +510,7 @@ func TestDefaultManagerFactory_CorrectQueryableUsed(t *testing.T) {
 			// create and use manager factory
 			pusher := newPusherMock()
 			pusher.MockPush(&mimirpb.WriteResponse{}, nil)
-			managerFactory := DefaultTenantManagerFactory(cfg, pusher, federatedQueryable, queryFunc, options.limits, nil)
+			managerFactory := DefaultTenantManagerFactory(cfg, pusher, federatedQueryable, queryFunc, options.limits, options.logger, nil)
 
 			manager := managerFactory(context.Background(), userID, notifierManager, options.logger, nil)
 
@@ -614,7 +615,7 @@ func TestDefaultManagerFactory_ShouldInjectReadConsistencyToContextBasedOnRuleDe
 
 			// Create the manager from the factory.
 			queryable := &storage.MockQueryable{MockQuerier: querier}
-			managerFactory := DefaultTenantManagerFactory(cfg, pusher, queryable, rules.EngineQueryFunc(eng, queryable), options.limits, nil)
+			managerFactory := DefaultTenantManagerFactory(cfg, pusher, queryable, rules.EngineQueryFunc(eng, queryable), options.limits, options.logger, nil)
 			manager := managerFactory(context.Background(), userID, notifierManager, options.logger, nil)
 
 			// Load rules into manager.
@@ -633,6 +634,28 @@ func TestDefaultManagerFactory_ShouldInjectReadConsistencyToContextBasedOnRuleDe
 			}
 		})
 	}
+}
+
+// TestInvalidRemoteWriteConfig tests that a validation error is raised when config is invalid
+func TestInvalidRemoteWriteConfig(t *testing.T) {
+	// if remote-write is not enabled, validation fails
+	cfg := defaultRulerConfig(t)
+	cfg.RemoteWrite = RemoteWriteConfig{
+		Enabled: false,
+	}
+	require.Nil(t, cfg.RemoteWrite.Validate())
+
+	// if no remote-write URL is configured, validation fails
+	cfg = defaultRulerConfig(t)
+	cfg.RemoteWrite = RemoteWriteConfig{
+		Enabled: true,
+		Clients: map[string]config.RemoteWriteConfig{
+			"default": {
+				URL: nil,
+			},
+		},
+	}
+	require.Error(t, cfg.RemoteWrite.Validate())
 }
 
 func TestDefaultManagerFactory_ShouldInjectStrongReadConsistencyToContextWhenQueryingAlertsForStateMetric(t *testing.T) {
@@ -711,7 +734,7 @@ func TestDefaultManagerFactory_ShouldInjectStrongReadConsistencyToContextWhenQue
 
 	// Create the manager from the factory.
 	queryable := &storage.MockQueryable{MockQuerier: querier}
-	managerFactory := DefaultTenantManagerFactory(cfg, pusher, queryable, rules.EngineQueryFunc(eng, queryable), options.limits, nil)
+	managerFactory := DefaultTenantManagerFactory(cfg, pusher, queryable, rules.EngineQueryFunc(eng, queryable), options.limits, options.logger, nil)
 	manager := managerFactory(context.Background(), userID, notifierManager, options.logger, nil)
 
 	// Load rules into manager.

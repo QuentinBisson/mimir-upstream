@@ -858,14 +858,6 @@ func (t *Mimir) initRuler() (serv services.Service, err error) {
 			queryFunc = rules.EngineQueryFunc(eng, queryable)
 		}
 	}
-	managerFactory := ruler.DefaultTenantManagerFactory(
-		t.Cfg.Ruler,
-		t.Distributor,
-		embeddedQueryable,
-		queryFunc,
-		t.Overrides,
-		t.Registerer,
-	)
 
 	// We need to prefix and add a label to the metrics for the DNS resolver because, unlike other mimir components,
 	// it doesn't already have the `cortex_` prefix and the `component` label to the metrics it emits
@@ -878,7 +870,21 @@ func (t *Mimir) initRuler() (serv services.Service, err error) {
 	)
 
 	dnsResolver := dns.NewProvider(util_log.Logger, dnsProviderReg, dns.GolangResolverType)
-	manager, err := ruler.NewDefaultMultiTenantManager(t.Cfg.Ruler, managerFactory, t.Registerer, util_log.Logger, dnsResolver)
+	managerFactory := ruler.DefaultTenantManagerFactory(
+		t.Cfg.Ruler,
+		t.Distributor,
+		embeddedQueryable,
+		queryFunc,
+		t.Overrides,
+		util_log.Logger,
+		t.Registerer,
+	)
+	manager, err := ruler.NewDefaultMultiTenantManager(
+		t.Cfg.Ruler,
+		managerFactory,
+		t.Registerer,
+		util_log.Logger,
+		dnsResolver)
 	if err != nil {
 		return nil, err
 	}

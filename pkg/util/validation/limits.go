@@ -18,6 +18,7 @@ import (
 
 	"github.com/grafana/dskit/flagext"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/relabel"
 	"golang.org/x/time/rate"
 	"gopkg.in/yaml.v3"
@@ -180,6 +181,12 @@ type Limits struct {
 	RulerRecordingRulesEvaluationEnabled bool           `yaml:"ruler_recording_rules_evaluation_enabled" json:"ruler_recording_rules_evaluation_enabled" category:"experimental"`
 	RulerAlertingRulesEvaluationEnabled  bool           `yaml:"ruler_alerting_rules_evaluation_enabled" json:"ruler_alerting_rules_evaluation_enabled" category:"experimental"`
 	RulerSyncRulesOnChangesEnabled       bool           `yaml:"ruler_sync_rules_on_changes_enabled" json:"ruler_sync_rules_on_changes_enabled" category:"advanced"`
+
+	// Ruler remote-write limits.
+	// this field is the inversion of the general remote_write.enabled because the zero value of a boolean is false,
+	// and if it were ruler_remote_write_enabled, it would be impossible to know if the value was explicitly set or default
+	RulerRemoteWriteDisabled bool                                `yaml:"ruler_remote_write_disabled" json:"ruler_remote_write_disabled" doc:"description=Disable recording rules remote-write."`
+	RulerRemoteWriteConfig   map[string]config.RemoteWriteConfig `yaml:"ruler_remote_write_config,omitempty" json:"ruler_remote_write_config,omitempty" doc:"description=Configures global and per-tenant limits for remote write clients. A map with remote client id as key."`
 
 	// Store-gateway.
 	StoreGatewayTenantShardSize int `yaml:"store_gateway_tenant_shard_size" json:"store_gateway_tenant_shard_size"`
@@ -825,6 +832,20 @@ func (o *Overrides) RulerAlertingRulesEvaluationEnabled(userID string) bool {
 // RulerSyncRulesOnChangesEnabled returns whether the ruler's event-based sync is enabled.
 func (o *Overrides) RulerSyncRulesOnChangesEnabled(userID string) bool {
 	return o.getOverridesForUser(userID).RulerSyncRulesOnChangesEnabled
+}
+
+// RulerRemoteWriteDisabled returns whether remote-write is disabled for a given user or not.
+func (o *Overrides) RulerRemoteWriteDisabled(userID string) bool {
+	return o.getOverridesForUser(userID).RulerRemoteWriteDisabled
+}
+
+// RulerRemoteWriteConfig returns the remote-write configurations to use for a given user and a given remote client.
+func (o *Overrides) RulerRemoteWriteConfig(userID string, id string) *config.RemoteWriteConfig {
+	if c, ok := o.getOverridesForUser(userID).RulerRemoteWriteConfig[id]; ok {
+		return &c
+	}
+
+	return nil
 }
 
 // StoreGatewayTenantShardSize returns the store-gateway shard size for a given user.

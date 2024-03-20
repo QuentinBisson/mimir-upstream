@@ -31,13 +31,17 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/rulefmt"
 	promRules "github.com/prometheus/prometheus/rules"
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v3"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/ruler/rulespb"
 	"github.com/grafana/mimir/pkg/ruler/rulestore"
+	"github.com/grafana/mimir/pkg/ruler/storage/cleaner"
+	"github.com/grafana/mimir/pkg/ruler/storage/instance"
 	"github.com/grafana/mimir/pkg/storage/tsdb/bucketcache"
 	"github.com/grafana/mimir/pkg/util"
 	util_log "github.com/grafana/mimir/pkg/util/log"
@@ -134,6 +138,12 @@ type Config struct {
 	// Allow to override timers for testing purposes.
 	RingCheckPeriod             time.Duration `yaml:"-"`
 	rulerSyncQueuePollFrequency time.Duration `yaml:"-"`
+
+	WAL instance.Config `yaml:"wal,omitempty"`
+	// we cannot define this in the WAL config since it creates an import cycle
+
+	WALCleaner  cleaner.Config    `yaml:"wal_cleaner,omitempty"`
+	RemoteWrite RemoteWriteConfig `yaml:"remote_write,omitempty" doc:"description=Remote-write configuration to send rule samples to a Prometheus remote-write endpoint."`
 }
 
 // Validate config and returns error on failure
@@ -150,6 +160,14 @@ func (cfg *Config) Validate(limits validation.Limits) error {
 		return errors.Wrap(err, "invalid ruler query-frontend config")
 	}
 
+	if err := cfg.RemoteWrite.Validate(); err != nil {
+		return fmt.Errorf("invalid ruler remote-write config: %w", err)
+	}
+
+	if err := cfg.WALCleaner.Validate(); err != nil {
+		return fmt.Errorf("invalid ruler wal cleaner config: %w", err)
+	}
+
 	return nil
 }
 
@@ -160,6 +178,9 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet, logger log.Logger) {
 	cfg.Notifier.RegisterFlags(f)
 	cfg.TenantFederation.RegisterFlags(f)
 	cfg.QueryFrontend.RegisterFlags(f)
+	cfg.RemoteWrite.RegisterFlags(f)
+	cfg.WAL.RegisterFlags(f)
+	cfg.WALCleaner.RegisterFlags(f)
 
 	cfg.ExternalURL.URL, _ = url.Parse("") // Must be non-nil
 	f.Var(&cfg.ExternalURL, "ruler.external.url", "URL of alerts return path.")
@@ -237,6 +258,64 @@ func newRulerMetrics(reg prometheus.Registerer) *rulerMetrics {
 	}
 
 	return m
+}
+
+type RemoteWriteConfig struct {
+	Clients             map[string]config.RemoteWriteConfig `yaml:"clients,omitempty" doc:"description=Configure remote write clients. A map with remote client id as key."`
+	Enabled             bool                                `yaml:"enabled"`
+	ConfigRefreshPeriod time.Duration                       `yaml:"config_refresh_period"`
+	AddOrgIDHeader      bool                                `yaml:"add_org_id_header" doc:"description=Add X-Scope-OrgID header in remote write requests."`
+}
+
+func (c *RemoteWriteConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+
+	if len(c.Clients) > 0 {
+		for id, clt := range c.Clients {
+			if clt.URL == nil {
+				return fmt.Errorf("remote-write enabled but client '%s' URL for tenant %s is not configured", clt.Name, id)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *RemoteWriteConfig) Clone() (*RemoteWriteConfig, error) {
+	out, err := yaml.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+
+	var n *RemoteWriteConfig
+	err = yaml.Unmarshal(out, &n)
+	if err != nil {
+		return nil, err
+	}
+
+	// BasicAuth.Password has a type of Secret (github.com/prometheus/common/config/config.go),
+	// so when its value is marshaled it is obfuscated as "<secret>".
+	// Here we copy the original password into the cloned config.
+	for id := range n.Clients {
+		if n.Clients[id].HTTPClientConfig.BasicAuth != nil {
+			n.Clients[id].HTTPClientConfig.BasicAuth.Password = c.Clients[id].HTTPClientConfig.BasicAuth.Password
+		}
+	}
+
+	return n, nil
+}
+
+// RegisterFlags adds the flags required to config this to the given FlagSet.
+func (c *RemoteWriteConfig) RegisterFlags(f *flag.FlagSet) {
+	f.BoolVar(&c.AddOrgIDHeader, "ruler.remote-write.add-org-id-header", true, "Add X-Scope-OrgID header in remote write requests.")
+	f.BoolVar(&c.Enabled, "ruler.remote-write.enabled", false, "Enable remote-write functionality.")
+	f.DurationVar(&c.ConfigRefreshPeriod, "ruler.remote-write.config-refresh-period", 10*time.Second, "Minimum period to wait between refreshing remote-write reconfigurations. This should be greater than or equivalent to -limits.per-user-override-period.")
+
+	if c.Clients == nil {
+		c.Clients = make(map[string]config.RemoteWriteConfig)
+	}
 }
 
 // MultiTenantManager is the interface of interaction with a Manager that is tenant aware.
